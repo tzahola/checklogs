@@ -26,13 +26,26 @@ export -f removecr
 
 function sanitizelog {
     {
-        if [[ "$(file -I "$1")" == *"charset=utf-16"* ]]; then 
-            iconv -f UTF-16 -t UTF-8 "$1"
-        elif [[ "$(file -I "$1")" == *"charset=iso-8859-1"* ]]; then 
-            iconv -f iso-8859-1 -t UTF-8 "$1"
-        else 
-            cat "$1"
-        fi
+		if command -v file &> /dev/null ; then
+			if [[ "$(file -I "$1")" == *"charset=utf-16"* ]]; then 
+				iconv -f UTF-16 -t UTF-8 "$1"
+			elif [[ "$(file -I "$1")" == *"charset=iso-8859-1"* ]]; then 
+				iconv -f iso-8859-1 -t UTF-8 "$1"
+			else 
+				cat "$1"
+			fi
+		elif command -v encguess &> /dev/null ; then
+			if [[ "$(encguess "$1")" == *"UTF-16" ]]; then 
+				iconv -f UTF-16 -t UTF-8 "$1"
+			elif [[ "$(encguess "$1")" == *"unknown" ]]; then 
+				iconv -f Windows-1251 -t UTF-8 "$1"
+			else 
+				cat "$1"
+			fi
+		else
+			echo "Can't guess file encoding!"
+			exit 1
+		fi
     } | removecr
 }
 
