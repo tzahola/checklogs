@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+
+function flacraw {
+    flac -swdc --endian=little --sign=signed --force-raw-format "$@"
+}
+
+function eaccrc {
+    local checksum="$(cksum -o 3)"
+    printf "%08X\n" "${checksum% *}"
+}
+
+function flaccmp {
+    cmp <(flacraw "$1") <(flacraw "$2")
+}
+
+function removecr {
+    local line=
+    while IFS= read -r line; do
+        if [[ "${line: -1}" == $'\r' ]]; then
+            line="${line:0: -1}"
+        fi
+        echo "$line"
+    done
+}
+export -f removecr
+
+function sanitizelog {
+    {
+        if [[ "$(file -I "$1")" == *"charset=utf-16"* ]]; then 
+            iconv -f UTF-16 -t UTF-8 "$1"
+        elif [[ "$(file -I "$1")" == *"charset=iso-8859-1"* ]]; then 
+            iconv -f iso-8859-1 -t UTF-8 "$1"
+        else 
+            cat "$1"
+        fi
+    } | removecr
+}
+
+function msf_to_samples {
+    local msf="$1"; shift
+    local m="${msf:0:2}"; [[ "${m:0:1}" == "0" ]] && m="${m:1:1}"
+    local s="${msf:3:2}"; [[ "${s:0:1}" == "0" ]] && s="${s:1:1}"
+    local f="${msf:6:2}"; [[ "${f:0:1}" == "0" ]] && f="${f:1:1}"
+    echo $(( ( ( $m * 60 + $s ) * 75 + $f ) * 588 ))
+}
+export -f msf_to_samples
+
+function samples_to_msf {
+    local samples="$1"; shift
+    samples=$(( $samples / 588 ))
+    local f=$(( $samples % 75 )); [[ ${#f} == 1 ]] && f="0$f"
+    samples=$(( $samples / 75 ))
+    local s=$(( $samples % 60 )); [[ ${#s} == 1 ]] && s="0$s"
+    samples=$(( $samples / 60 ))
+    local m=$samples; [[ ${#m} == 1 ]] && m="0$m"
+    echo "$m:$s:$f"
+}
+export -f samples_to_msf
+
+function processlog {
+    unset log_crcs
+    unset null_samples_used
+    unset null_samples_known
+    unset log_type
+    unset test_and_copy
+    unset test_and_copy_mismatch
+    
+    null_samples_known=0
+    test_and_copy=0
+    test_and_copy_mismatch=0
+    declare -ga log_crcs
+
+    local line=
+    read -r line
+    if [[ "$line" == "Exact Audio Copy"* ]]; then
+        read -r _
+        read -r line
+    fi
+
+    if [[ "$line" == *EAC* ]]; then
+        if [[ "$line" == *EAC\ extraction* ]]; then
+            log_type="English EAC"
+        else
+            log_type="foreign EAC"
+        fi
+        local -A crcs
+        local track="image"
+        while IFS= read -r line; do
+            if [[ "$line" == *"Null samples used in CRC calculations       : "* ]]; then
+                null_samples_known=1
+                if [[ "$line" == *": Yes"* ]]; then
+                    null_samples_used=1
+                else
+                    null_samples_used=0
+                fi
+            elif [[ "$line" =~ ^\ +.*CRC.*\ [0-9A-F]{8}$ ]]; then
+                local crc="${line: -8:8}"
+                if [[ "${crcs[$track]}" != "" ]]; then
+                    test_and_copy=1
+                    if [[ "${crcs[$track]}" != "$crc" ]]; then
+                        test_and_copy_mismatch=1
+                    fi
+                fi
+                crcs["$track"]="${line: -8:8}"
+            elif [[ "$line" =~ ^[^\ ]+\ {1,2}[0-9]{1,2}$ ]]; then
+                track="${line##*\ }"
+                crcs[$track]=
+            fi
+        done
+        while read -r i; do
+            log_crcs+=("${crcs[$i]}")
+        done < <(printf "%s\n" "${!crcs[@]}" | sort -n )
+    elif [[ "$line" == "X Lossless Decoder"* ]]; then
+        log_type="XLD"
+        null_samples_known=1
+        null_samples_used=1
+        test_and_copy=1
+        while read -r line; do
+            if [[ "$line" =~ ^\ *CRC32\ hash\ *:\  ]]; then
+                local crc="${line#*\ :\ }"
+                crc="${crc:0:8}"
+                log_crcs+=("$crc")
+            fi
+        done
+    else
+        log_type="Unknown"
+        log_first_line="$line"
+    fi
+}
+
+function processcue {
+    unset pregap_length
+    pregap_length=0
+    local track=0
+    local line=
+    while read -r line; do
+        if [[ "$line" =~ ^[\ \t]*TRACK\ [0-9]{2}\ AUDIO[\ \t]*$ ]]; then
+            track="${line#*TRACK\ }"
+            track="${track:0:2}"
+        elif [[ "$line" =~ ^[\ \t]*INDEX\ [0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}[\ \t]*$ ]]; then
+            local index="${line#*INDEX\ }"
+            index="${index:0:2}"
+            if [[ "$track" == "01" && "$index" == "01" ]]; then
+                local time="${line#*INDEX\ ??\ }"
+                time="${time:0:8}"
+                pregap_length="$(msf_to_samples "$time")"
+            fi
+        fi
+    done < <(removecr)
+}
+
+export tmp="$(mktemp -d)"
+trap "rm -rf \"$tmp\";" EXIT
+
+cat << EOF > "$tmp/skipZero.c"
+#include <stdio.h>
+int main(int argc, char** argv) {
+    for(;;) {
+        int a,b;
+        a = getchar();
+        if (a == EOF) return 0;
+        b = getchar();
+        if (a != 0 || b != 0) {
+            putchar(a);
+            putchar(b);
+        }
+    }
+    return -1;
+}
+EOF
+cc "$tmp/skipZero.c" -o "$tmp/skipZero"
+
+export skipzeros="$tmp/skipZero"
+
+declare -a dirs
+maxlength=100
+while [ "$1" != "" ]; do
+    dir="$1"; shift
+    dirs+=("$dir")
+    [[ $maxlength -lt ${#dir} ]] && maxlength=${#dir}
+done
+
+for dir in "${dirs[@]}"; do
+    printf "%-${maxlength}s:" "$dir"
+
+    if [[ "$(find "$dir" -iname "*.flac" -depth 1 )" == "" ]]; then
+        printf " no FLAC files were found!\n"
+        continue
+    fi
+
+    if [[ "$(find "$dir" -iname "*.log" -depth 1 )" == "" ]]; then
+        printf " no log file were found!\n"
+        continue
+    fi
+
+    processlog < <(sanitizelog "$dir/"*.[lL][oO][gG])
+    if [[ "$log_type" == "Unknown" ]]; then
+        printf " unkown log (\"$log_first_line\")\n"
+        continue
+    fi
+    
+    if [[ "$(find "$dir" -iname "*.cue" -depth 1)" == "" ]]; then
+        has_cue=0
+        pregap_length=0
+    else
+        has_cue=1
+        processcue < "$dir/"*.[cC][uU][eE]
+    fi
+
+    files=("$dir/"*.[fF][lL][aA][cC])
+    disc_image=0
+    if [ "${#log_crcs[@]}" == 1 ] && [ "${#files[@]}" -gt 1 ]; then
+        disc_image=1
+    elif [ "${#log_crcs[@]}" != "${#files[@]}" ]; then
+        printf " track count mismatch! (log: ${#log_crcs[@]}, files: ${#files[@]})\n"
+        continue
+    fi
+
+    function process {
+        local with_zeros="$1"; shift
+        local without_zeros="$1"; shift
+        local target_dir="$tmp"
+        local base_name="$(uuidgen)"
+        local -a pids
+
+        if [ "$with_zeros" == 1 ]; then
+            mkfifo "$target_dir/$base_name.crc.in"
+            eaccrc < "$target_dir/$base_name.crc.in" > "$target_dir/$base_name.crc.out" & pids+=($!)
+        fi
+
+        if [ "$without_zeros" == 1 ]; then
+            mkfifo "$target_dir/$base_name.crc_no_zeros.in"
+            "$skipzeros" < "$target_dir/$base_name.crc_no_zeros.in" | eaccrc > "$target_dir/$base_name.crc_no_zeros.out" & pids+=($!)
+        fi
+
+        tee "$target_dir/$base_name"*.in > /dev/null
+        wait ${pids[*]}
+        unset pids
+
+        if [ "$with_zeros" == 1 ]; then
+            crc_with_zeros="$(cat "$target_dir/$base_name.crc.out")"
+        else
+            unset crc_with_zeros
+        fi
+
+        if [ "$without_zeros" == 1 ]; then
+            crc_without_zeros="$(cat "$target_dir/$base_name.crc_no_zeros.out")"
+        else
+            unset crc_without_zeros
+        fi
+
+        rm "$target_dir/$base_name"*
+    }
+
+    if [ "$null_samples_known" == 0 ] || [ "$null_samples_used" == 1 ]; then
+        with_zeros=1
+    else
+        with_zeros=0
+    fi
+
+    if [ "$null_samples_known" == 0 ] || [ "$null_samples_used" == 0 ]; then
+        without_zeros=1
+    else
+        without_zeros=0
+    fi
+    
+    unset crcs_with_zeros
+    unset crcs_without_zeros
+    unset lengths
+    declare -a crcs_with_zeros
+    declare -a crcs_without_zeros
+    declare -a lengths
+    while read -r file; do
+        lengths+=("$(metaflac --show-total-samples "$file")")
+    done < <(printf "%s\n" "${files[@]}")
+
+    if [[ "$disc_image" == 1 ]]; then
+        process "$with_zeros" "$without_zeros" < <(flacraw "${files[@]}")
+        [[ "$with_zeros" == 1 ]] && crcs_with_zeros="$crc_with_zeros"
+        [[ "$without_zeros" == 1 ]] && crcs_without_zeros="$crc_without_zeros"
+    else
+        i=0
+        for f in "${files[@]}"; do
+            process "$with_zeros" "$without_zeros" < <(flacraw "$f" --skip "$( [[ $i == 0 ]] && printf "$pregap_length" || printf 0 )")
+            [[ "$with_zeros" == 1 ]] && crcs_with_zeros+=("$crc_with_zeros")
+            [[ "$without_zeros" == 1 ]] && crcs_without_zeros+=("$crc_without_zeros")
+            i=$(( $i + 1))
+        done
+    fi
+    
+    ok=0
+    log_crcs_flattened="$(printf "%s " "${log_crcs[@]}")"
+    crcs_with_zeros_flattened="$(printf "%s " "${crcs_with_zeros[@]}")"
+    crcs_without_zeros_flattened="$(printf "%s " "${crcs_without_zeros[@]}")"
+
+    if [[ "$log_crcs_flattened" == "$crcs_with_zeros_flattened" ]]; then
+        ok=1
+        zeros_were_used=1
+    elif [[ "$log_crcs_flattened" == "$crcs_without_zeros_flattened" ]]; then
+        ok=1
+        zeros_were_used=0
+    else
+        ok=0
+    fi
+    
+    if [[ "$ok" == 1 ]]; then 
+        printf " ok"
+        printf ", $log_type"
+        [[ "$test_and_copy_mismatch" != 0 ]] && printf ", test and copy mismatch"
+        [[ "$test_and_copy" != 1 ]] && printf ", no test and copy"
+        [[ "$has_cue" != 1 ]] && printf ", missing cuesheet"
+        [[ "$disc_image" == 1 ]] && printf ", disc image"
+        [[ "$null_samples_known" != 1 ]] && printf ", null sample usage unspecified"
+        [[ "$zeros_were_used" != 1 ]] && printf ", without null"
+        [[ "$pregap_length" != 0 ]] && printf ", skipped $pregap_length samples pregap"
+    else
+        printf "crc mismatch"
+        printf ", $log_type"
+        printf "\n"
+        printf "log          : $log_crcs_flattened\n"
+        printf "with zeros   : $crcs_with_zeros_flattened\n"
+        printf "without zeros: $crcs_without_zeros_flattened\n"
+        printf "lengths      :"
+        while read -r length; do
+            printf " %s" "$(samples_to_msf "$length")"
+        done < <(printf "%s\n" "${lengths[@]}")
+        printf "\n"
+    fi
+    printf "\n"
+done
+
