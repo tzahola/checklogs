@@ -196,12 +196,12 @@ done
 for dir in "${dirs[@]}"; do
     printf "%-${maxlength}s:" "$dir"
 
-    if [[ "$(find "$dir" -iname "*.flac" -depth 1 )" == "" ]]; then
+    if [[ "$(find "$dir" -maxdepth 1 -iname "*.flac" )" == "" ]]; then
         printf " no FLAC files were found!\n"
         continue
     fi
 
-    if [[ "$(find "$dir" -iname "*.log" -depth 1 )" == "" ]]; then
+    if [[ "$(find "$dir" -maxdepth 1 -iname "*.log" )" == "" ]]; then
         printf " no log file were found!\n"
         continue
     fi
@@ -212,7 +212,7 @@ for dir in "${dirs[@]}"; do
         continue
     fi
     
-    if [[ "$(find "$dir" -iname "*.cue" -depth 1)" == "" ]]; then
+    if [[ "$(find "$dir" -maxdepth 1 -iname "*.cue" )" == "" ]]; then
         has_cue=0
         pregap_length=0
     else
