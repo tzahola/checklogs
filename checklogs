@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 
+set -euo pipefail
+IFS=$'\t\n'
+
 function flacraw {
     flac -swdc --endian=little --sign=signed --force-raw-format "$@"
 }
@@ -178,7 +181,7 @@ export -f skipzeros
 
 declare -a dirs
 maxlength=100
-while [ "$1" != "" ]; do
+while [[ $# -gt 0 ]]; do
     dir="$1"; shift
     dirs+=("$dir")
     [[ $maxlength -lt ${#dir} ]] && maxlength=${#dir}
