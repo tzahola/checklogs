@@ -4,10 +4,17 @@ function flacraw {
     flac -swdc --endian=little --sign=signed --force-raw-format "$@"
 }
 
-function eaccrc {
-    local checksum="$(cksum -o 3)"
-    printf "%08X\n" "${checksum% *}"
-}
+if cksum -o 3 </dev/null &>/dev/null; then
+    function eaccrc {
+        local checksum="$(cksum -o 3)"
+        printf "%08X\n" "${checksum% *}"
+    }
+else
+    function eaccrc {
+        local checksum="$(crc32 <(cat))"
+        printf "%s\n" "${checksum^^}"
+    }
+fi  
 
 function flaccmp {
     cmp <(flacraw "$1") <(flacraw "$2")
