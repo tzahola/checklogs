@@ -170,27 +170,11 @@ function processcue {
 }
 
 export tmp="$(mktemp -d)"
-trap "rm -rf \"$tmp\";" EXIT
 
-cat << EOF > "$tmp/skipZero.c"
-#include <stdio.h>
-int main(int argc, char** argv) {
-    for(;;) {
-        int a,b;
-        a = getchar();
-        if (a == EOF) return 0;
-        b = getchar();
-        if (a != 0 || b != 0) {
-            putchar(a);
-            putchar(b);
-        }
-    }
-    return -1;
+function skipzeros {
+    xxd -c 2 -ps | grep -v 0000 | xxd -r -ps
 }
-EOF
-cc "$tmp/skipZero.c" -o "$tmp/skipZero"
-
-export skipzeros="$tmp/skipZero"
+export -f skipzeros
 
 declare -a dirs
 maxlength=100
@@ -250,7 +234,7 @@ for dir in "${dirs[@]}"; do
 
         if [ "$without_zeros" == 1 ]; then
             mkfifo "$target_dir/$base_name.crc_no_zeros.in"
-            "$skipzeros" < "$target_dir/$base_name.crc_no_zeros.in" | eaccrc > "$target_dir/$base_name.crc_no_zeros.out" & pids+=($!)
+            skipzeros < "$target_dir/$base_name.crc_no_zeros.in" | eaccrc > "$target_dir/$base_name.crc_no_zeros.out" & pids+=($!)
         fi
 
         tee "$target_dir/$base_name"*.in > /dev/null
