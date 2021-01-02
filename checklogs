@@ -202,7 +202,7 @@ for dir in "${dirs[@]}"; do
 
     processlog < <(sanitizelog "$dir/"*.[lL][oO][gG])
     if [[ "$log_type" == "Unknown" ]]; then
-        printf " unkown log (\"$log_first_line\")\n"
+        printf " unknown log (\"$log_first_line\")\n"
         continue
     fi
     
